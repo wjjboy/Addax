@@ -19,6 +19,8 @@
 
 package com.wgzhao.addax.plugin.writer.influxdb2writer;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
 import com.influxdb.client.InfluxDBClient;
 import com.influxdb.client.InfluxDBClientFactory;
 import com.influxdb.client.WriteApi;
@@ -30,6 +32,8 @@ import com.wgzhao.addax.common.exception.AddaxException;
 import com.wgzhao.addax.common.plugin.RecordReceiver;
 import com.wgzhao.addax.common.spi.Writer;
 import com.wgzhao.addax.common.util.Configuration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -50,6 +54,7 @@ public class InfluxDB2Writer
     public static class Job
             extends Writer.Job
     {
+
         private Configuration originalConfig = null;
 
         @Override
@@ -76,11 +81,14 @@ public class InfluxDB2Writer
         }
 
         @Override
-        public List<Configuration> split(int adviceNumber)
+        public List<Configuration> split(int mandatoryNumber)
         {
-            List<Configuration> splitConfigs = new ArrayList<>();
-            splitConfigs.add(originalConfig);
-            return splitConfigs;
+            //修改多channel无效问题
+            ArrayList<Configuration> configurations = new ArrayList<Configuration>(mandatoryNumber);
+            for (int i = 0; i < mandatoryNumber; i++) {
+                configurations.add(this.originalConfig.clone());
+            }
+            return configurations;
         }
 
         @Override
@@ -99,6 +107,7 @@ public class InfluxDB2Writer
     public static class Task
             extends Writer.Task
     {
+        private static final Logger LOG = LoggerFactory.getLogger(Task.class);
         private String endpoint;
         private String token;
         private String org;
@@ -150,22 +159,81 @@ public class InfluxDB2Writer
                 point.time(processTimeUnit(instant), wp);
                 for (int i = 0; i < columns.size(); i++) {
                     String name = columns.get(i);
+                    String dest;
+                    if (name.contains(":")) {
+                        String[] str = name.split(":");
+                        name = str[0];
+                        dest = str[1].toUpperCase();
+                    } else {
+                        dest = "FIELD";
+                    }
+
                     column = record.getColumn(i + 1); // the first field has processed above
 
-                    switch (column.getType()) {
-                        case LONG:
-                            point.addField(name, column.asLong());
-                            break;
-                        case DOUBLE:
-                            point.addField(name, column.asDouble());
-                            break;
-                        case BOOL:
-                            point.addField(name, column.asBoolean());
-                            break;
-                        case DATE:
-                        default:
-                            point.addField(name, column.asString());
-                            break;
+                    if ("LIST".equals(dest)) {
+                        switch (column.getType()) {
+                            case STRING:
+                                String str = column.asString();
+                                JSONArray array = new JSONArray();
+                                try {
+                                    array = JSON.parseArray(str);
+                                } catch (Exception e) {
+                                    // 字符串转数组异常直接跳过
+                                    LOG.error("list string to array error: {}", str);
+                                }
+                                for(int j = 0; j < array.size(); j++) {
+                                    String o = array.getString(j);
+                                    try {
+                                        if(o.contains(".")) {
+                                            // 小数
+                                            point.addField(name + (j + 1), Double.valueOf(o));
+                                        } else {
+                                            // 整数
+                                            point.addField(name + (j + 1), Long.valueOf(o));
+                                        }
+                                    } catch (NumberFormatException e) {
+                                        // 转换异常直接跳过
+                                        LOG.error("number format error: {}", str);
+                                    }
+
+                                }
+                                break;
+                            default:
+                                point.addField(name, column.asString());
+                                break;
+                        }
+                    } else if ("TAG".equals(dest)) {
+                        switch (column.getType()) {
+                            case LONG:
+                                point.addTag(name, String.valueOf(column.asLong()));
+                                break;
+                            case DOUBLE:
+                                point.addTag(name, String.valueOf(column.asDouble()));
+                                break;
+                            case BOOL:
+                                point.addTag(name, String.valueOf(column.asBoolean()));
+                                break;
+                            case DATE:
+                            default:
+                                point.addTag(name, column.asString());
+                                break;
+                        }
+                    } else {
+                        switch (column.getType()) {
+                            case LONG:
+                                point.addField(name, column.asLong());
+                                break;
+                            case DOUBLE:
+                                point.addField(name, column.asDouble());
+                                break;
+                            case BOOL:
+                                point.addField(name, column.asBoolean());
+                                break;
+                            case DATE:
+                            default:
+                                point.addField(name, column.asString());
+                                break;
+                        }
                     }
                 }
                 points.add(point);
@@ -212,4 +280,5 @@ public class InfluxDB2Writer
             //
         }
     }
+
 }
